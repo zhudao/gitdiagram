@@ -1,22 +1,66 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Suspense } from "react";
 
 import { getCachedBrowsePage } from "~/server/browse-index-cache";
 import { BrowseCatalog } from "~/components/browse-catalog";
 import { BrowseTabs } from "~/components/browse-tabs";
 import { Skeleton } from "~/components/ui/skeleton";
-import type { BrowseQuery } from "~/features/browse/catalog";
+import {
+  normalizeBrowseQuery,
+  type BrowseQuery,
+} from "~/features/browse/catalog";
 
-export const metadata: Metadata = {
-  title: "Browse Diagrams | GitDiagram",
-  description:
-    "Browse all public repositories with stored diagrams, sorted by recency or stars.",
-  alternates: {
-    canonical: "/browse",
-  },
+type BrowsePageProps = {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
 
+const DESCRIPTION =
+  "Browse all public repositories with stored diagrams, sorted by recency or stars.";
+
+/**
+ * Plain pages of the newest diagrams (`?page=2`) are their own canonical, so
+ * search engines follow their links to every repository page (Previous and
+ * Next are links). Searches, filters and other sorts point at /browse.
+ */
+export async function generateMetadata({
+  searchParams,
+}: BrowsePageProps): Promise<Metadata> {
+  const params = await searchParams;
+  const query = normalizeBrowseQuery({
+    q: firstSearchParam(params.q),
+    sort: firstSearchParam(params.sort),
+    minStars: firstSearchParam(params.minStars),
+    page: firstSearchParam(params.page),
+  });
+  const plainPage =
+    !query.q && query.sort === "recent_desc" && query.minStars === 0
+      ? query.page
+      : 1;
+  return {
+    title:
+      plainPage > 1
+        ? `Browse Diagrams, page ${plainPage} | GitDiagram`
+        : "Browse Diagrams | GitDiagram",
+    description: DESCRIPTION,
+    alternates: {
+      canonical: plainPage > 1 ? `/browse?page=${plainPage}` : "/browse",
+    },
+  };
+}
+
 export const dynamic = "force-dynamic";
+
+// The guide and comparison pages, reached from here and nowhere else in the
+// site's chrome (one quiet line under the catalog).
+const GUIDES: ReadonlyArray<readonly [string, string]> = [
+  ["/visualize-codebase", "How to visualize a codebase"],
+  ["/compare/deepwiki", "GitDiagram vs DeepWiki"],
+  ["/compare/sourcegraph", "vs Sourcegraph"],
+  ["/compare/mermaid", "vs Mermaid"],
+  ["/best-codebase-visualization-tools", "all comparisons"],
+  ["/architecture-examples", "architecture examples"],
+];
 
 function firstSearchParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
@@ -56,11 +100,7 @@ async function BrowseCatalogWithInitialData({
   );
 }
 
-export default async function BrowsePage({
-  searchParams,
-}: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
-}) {
+export default async function BrowsePage({ searchParams }: BrowsePageProps) {
   const params = await searchParams;
   const initialQuery: BrowseQuery = {
     q: firstSearchParam(params.q),
@@ -84,6 +124,18 @@ export default async function BrowsePage({
         <Suspense fallback={<BrowseCatalogStreamingFallback />}>
           <BrowseCatalogWithInitialData initialQuery={initialQuery} />
         </Suspense>
+
+        <p className="mt-7 text-center text-[13px] leading-[1.9] text-[#6d5282] dark:text-neutral-400">
+          Guides:{" "}
+          {GUIDES.map(([href, label], index) => (
+            <span key={href}>
+              {index > 0 && " · "}
+              <Link href={href} className="neo-link hover:underline">
+                {label}
+              </Link>
+            </span>
+          ))}
+        </p>
       </div>
     </main>
   );

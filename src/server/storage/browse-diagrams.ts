@@ -108,13 +108,43 @@ function compareBrowseEntriesByRecent(
   );
 }
 
+function normalizeLanguage(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const language = value.trim().slice(0, 64);
+  return language || null;
+}
+
 function normalizeBrowseIndexEntry(entry: BrowseIndexEntry): BrowseIndexEntry {
+  const language = normalizeLanguage(entry.language);
   return {
     username: entry.username.trim().toLowerCase(),
     repo: entry.repo.trim().toLowerCase(),
     lastSuccessfulAt: entry.lastSuccessfulAt,
     stargazerCount:
       typeof entry.stargazerCount === "number" ? entry.stargazerCount : null,
+    // Left out when unknown: most of the index predates it, and an explicit
+    // null on every entry would grow the snapshot by megabytes.
+    ...(language ? { language } : {}),
+    ...(entry.renamed === true ? { renamed: true as const } : {}),
+  };
+}
+
+/** The preferred entry, keeping a language only the other one knew. */
+function mergeBrowseIndexEntries(
+  existing: BrowseIndexEntry | undefined,
+  incoming: BrowseIndexEntry,
+): BrowseIndexEntry {
+  const preferred = pickPreferredEntry(existing, incoming);
+  const other = preferred === incoming ? existing : incoming;
+  const language = preferred.language ?? other?.language;
+  const renamed = preferred.renamed ?? other?.renamed;
+  if (preferred.language === language && preferred.renamed === renamed) {
+    return preferred;
+  }
+  return {
+    ...preferred,
+    ...(language ? { language } : {}),
+    ...(renamed ? { renamed } : {}),
   };
 }
 
@@ -152,7 +182,7 @@ function normalizeBrowseIndexEntries(
   for (const rawEntry of entries) {
     const entry = normalizeBrowseIndexEntry(rawEntry);
     const repoKey = toRepoKey(entry);
-    deduped.set(repoKey, pickPreferredEntry(deduped.get(repoKey), entry));
+    deduped.set(repoKey, mergeBrowseIndexEntries(deduped.get(repoKey), entry));
   }
 
   return Array.from(deduped.values()).sort(compareBrowseEntriesByRecent);
@@ -186,17 +216,23 @@ function applyBrowseIndexEntry(
       candidate.username === entry.username && candidate.repo === entry.repo,
   );
   const existingEntry = entries[existingIndex];
+  const merged = mergeBrowseIndexEntries(existingEntry, entry);
+  if (existingEntry && merged === existingEntry) {
+    return false;
+  }
   if (
     existingEntry &&
     pickPreferredEntry(existingEntry, entry) === existingEntry
   ) {
-    return false;
+    // Same position in the order; only the language was learned.
+    entries[existingIndex] = merged;
+    return true;
   }
 
   if (existingIndex >= 0) {
     entries.splice(existingIndex, 1);
   }
-  insertRecentEntry(entries, entry);
+  insertRecentEntry(entries, merged);
   return true;
 }
 
@@ -502,6 +538,63 @@ export async function removeBrowseIndexEntry(
         expectedManifestEtag: stored.manifestEtag,
       });
       return true;
+    },
+  });
+}
+
+/** What the back-fill learned about one repository from GitHub. */
+export interface BrowseIndexLanguage {
+  language: string | null;
+  /** GitHub answers under another name: an old name of the repository. */
+  renamed: boolean;
+}
+
+/**
+ * Writes repositories' GitHub languages into the index (the one-off back-fill
+ * for entries made before the index kept them; scripts/backfill-browse-
+ * languages.ts). A language is only added where none is set, never removed;
+ * the renamed mark follows what GitHub said. No entry is added or removed,
+ * and the manifest is written conditionally under the index lock, so a
+ * generation finishing meanwhile is never lost. Returns how many entries
+ * changed.
+ */
+export async function applyBrowseIndexLanguages(
+  languages: ReadonlyMap<string, BrowseIndexLanguage>,
+): Promise<number> {
+  return withDistributedLock({
+    key: PUBLIC_BROWSE_INDEX_LOCK_KEY,
+    ttlMs: BROWSE_INDEX_LOCK_TTL_MS,
+    waitMs: BROWSE_INDEX_LOCK_WAIT_MS,
+    callback: async () => {
+      const stored = await readStoredBrowseIndex();
+      if (!stored?.activeSnapshotKey) throw new BrowseIndexNotFoundError();
+      let changed = 0;
+      const entries = stored.entries.map((entry) => {
+        const learned = languages.get(toRepoKey(entry));
+        if (!learned) return entry;
+        const language =
+          entry.language ?? normalizeLanguage(learned.language) ?? undefined;
+        if (
+          language === entry.language &&
+          learned.renamed === (entry.renamed === true)
+        ) {
+          return entry;
+        }
+        changed++;
+        const next: BrowseIndexEntry = { ...entry };
+        if (language) next.language = language;
+        if (learned.renamed) next.renamed = true;
+        else delete next.renamed;
+        return next;
+      });
+      if (changed > 0) {
+        await writeBrowseIndex({
+          entries,
+          retainedSnapshotKeys: stored.retainedSnapshotKeys,
+          expectedManifestEtag: stored.manifestEtag,
+        });
+      }
+      return changed;
     },
   });
 }

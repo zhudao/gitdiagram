@@ -25,9 +25,11 @@ const storageMocks = vi.hoisted(() => ({
 vi.mock("~/server/storage/r2", () => storageMocks);
 
 import {
+  applyBrowseIndexLanguages,
   BrowseIndexNotFoundError,
   getBrowsePage,
   migrateBrowseIndexToAtomicV3,
+  readBrowseIndex,
   readRecentBrowseIndex,
   upsertBrowseIndexEntry,
   type BrowseIndexEntry,
@@ -240,6 +242,116 @@ describe("browse diagram storage", () => {
       BUCKET,
       V3_MANIFEST_KEY,
     );
+  });
+
+  it("keeps a language a newer entry lacks, and learns one an older entry has", async () => {
+    seedAtomicIndex([
+      {
+        username: "acme",
+        repo: "demo",
+        lastSuccessfulAt: "2026-03-29T12:00:00.000Z",
+        stargazerCount: 42,
+        language: "Go",
+      },
+      {
+        username: "acme",
+        repo: "other",
+        lastSuccessfulAt: "2026-03-29T12:00:00.000Z",
+        stargazerCount: 7,
+      },
+    ]);
+
+    await upsertBrowseIndexEntry({
+      username: "acme",
+      repo: "demo",
+      lastSuccessfulAt: "2026-03-30T12:00:00.000Z",
+      stargazerCount: 43,
+    });
+    const entries = await upsertBrowseIndexEntry({
+      username: "acme",
+      repo: "other",
+      lastSuccessfulAt: "2026-03-28T12:00:00.000Z",
+      stargazerCount: 7,
+      language: "Rust",
+    });
+
+    expect(entries).toEqual([
+      {
+        username: "acme",
+        repo: "demo",
+        lastSuccessfulAt: "2026-03-30T12:00:00.000Z",
+        stargazerCount: 43,
+        language: "Go",
+      },
+      {
+        username: "acme",
+        repo: "other",
+        lastSuccessfulAt: "2026-03-29T12:00:00.000Z",
+        stargazerCount: 7,
+        language: "Rust",
+      },
+    ]);
+  });
+
+  it("back-fills languages only where missing, never adding or removing entries", async () => {
+    seedAtomicIndex([
+      {
+        username: "acme",
+        repo: "demo",
+        lastSuccessfulAt: "2026-03-29T12:00:00.000Z",
+        stargazerCount: 42,
+        language: "Go",
+      },
+      {
+        username: "acme",
+        repo: "other",
+        lastSuccessfulAt: "2026-03-28T12:00:00.000Z",
+        stargazerCount: 7,
+      },
+    ]);
+
+    const changed = await applyBrowseIndexLanguages(
+      new Map([
+        ["acme/demo", { language: "Python", renamed: false }],
+        ["acme/other", { language: "Rust", renamed: false }],
+        ["not/listed", { language: "C", renamed: false }],
+      ]),
+    );
+
+    expect(changed).toBe(1);
+    expect(await readBrowseIndex()).toEqual([
+      expect.objectContaining({ repo: "demo", language: "Go" }),
+      expect.objectContaining({ repo: "other", language: "Rust" }),
+    ]);
+  });
+
+  it("marks an old name of a renamed repository and keeps its language", async () => {
+    seedAtomicIndex([
+      {
+        username: "facebook",
+        repo: "react",
+        lastSuccessfulAt: "2026-03-29T12:00:00.000Z",
+        stargazerCount: 42,
+      },
+    ]);
+
+    expect(
+      await applyBrowseIndexLanguages(
+        new Map([
+          ["facebook/react", { language: "JavaScript", renamed: true }],
+        ]),
+      ),
+    ).toBe(1);
+    expect((await readBrowseIndex())?.[0]).toMatchObject({
+      language: "JavaScript",
+      renamed: true,
+    });
+    // Learning it again changes nothing; a language is never taken off.
+    expect(
+      await applyBrowseIndexLanguages(
+        new Map([["facebook/react", { language: null, renamed: true }]]),
+      ),
+    ).toBe(0);
   });
 
   it("does not rewrite a committed snapshot for a stale repository update", async () => {

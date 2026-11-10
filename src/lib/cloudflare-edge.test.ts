@@ -126,11 +126,38 @@ describe("edgeDecision", () => {
     }
   });
 
-  it("keeps the blocked crawlers off repository pages only", () => {
+  it("treats the comparison pages as the site's own, not repositories", () => {
+    expect(edgeDecision("/compare/deepwiki", "ClaudeBot/1.0")).toBeNull();
+    expect(edgeDecision("/compare/madge", "Amazonbot/0.1")).toBeNull();
+    expect(edgeDecision("/compare/mermaid", "Mozilla/5.0")).toBeNull();
+    expect(edgeDecision("/compare/mermaid.md", null)).toBeNull();
+    expect(edgeDecision("/compare/mermaid/llms.txt", null)).toBeNull();
+    // Any other /compare/ path is not a page (and not a repository).
+    for (const path of [
+      "/compare/nope",
+      "/compare/deepwiki/video",
+      "/compare/a/b/c",
+    ])
+      expect(edgeDecision(path, null)).toEqual({ action: "missing" });
+  });
+
+  it("treats the situation guides as the site's own, not repositories", () => {
+    expect(
+      edgeDecision("/guides/understand-a-monorepo", "ClaudeBot/1.0"),
+    ).toBeNull();
+    expect(edgeDecision("/guides/legacy-codebase", "Mozilla/5.0")).toBeNull();
+    expect(edgeDecision("/guides/legacy-codebase.md", null)).toBeNull();
+    expect(edgeDecision("/guides/legacy-codebase/llms.txt", null)).toBeNull();
+    for (const path of ["/guides/nope", "/guides/legacy-codebase/video"])
+      expect(edgeDecision(path, null)).toEqual({ action: "missing" });
+  });
+
+  it("refuses no crawler by name; they share the page limit", () => {
     const claude =
       "Mozilla/5.0 (compatible; ClaudeBot/1.0; +claudebot@anthropic.com)";
-    expect(edgeDecision("/vercel/next.js", claude)?.action).toBe("deny");
-    expect(edgeDecision("/vercel/next.js/", claude)?.action).toBe("deny");
+    // ClaudeBot reads repository pages under the ordinary limit.
+    expect(edgeDecision("/vercel/next.js", claude)?.action).toBe("limit");
+    expect(edgeDecision("/vercel/next.js/", claude)?.action).toBe("limit");
     expect(
       edgeDecision("/vercel/next.js/opengraph-image", claude)?.action,
     ).toBe("limit");
@@ -144,14 +171,12 @@ describe("edgeDecision", () => {
     );
 
     const amazon = "Mozilla/5.0 (compatible; Amazonbot/0.1)";
-    expect(edgeDecision("/a/b", amazon)?.action).toBe("deny");
-    expect(edgeDecision("/a/b/opengraph-image", amazon)?.action).toBe("deny");
-    expect(edgeDecision("/a/b/twitter-image", amazon)?.action).toBe("deny");
+    expect(edgeDecision("/a/b", amazon)?.action).toBe("limit");
+    expect(edgeDecision("/a/b/opengraph-image", amazon)?.action).toBe("limit");
     expect(edgeDecision("/a/b/diagram.png", amazon)).toBeNull();
-    expect(edgeDecision("/a/b", "Brightbot 1.0")?.action).toBe("deny");
-    expect(edgeDecision("/a/b", "Brightbot 1.0 extra")?.action).toBe("limit");
-    // A verified crawler is still refused where its rule says so.
-    expect(edgeDecision("/a/b", amazon, true)?.action).toBe("deny");
+    expect(edgeDecision("/a/b", "Brightbot 1.0")?.action).toBe("limit");
+    // A verified crawler is never held back.
+    expect(edgeDecision("/a/b", amazon, true)).toBeNull();
   });
 
   it("limits repository pages per address, except for verified crawlers", () => {

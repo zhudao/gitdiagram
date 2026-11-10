@@ -1,4 +1,6 @@
 import { normalizeBrowseQuery } from "../features/browse/catalog";
+import { isUnknownComparePath } from "../features/compare/slugs";
+import { isUnknownGuidePath } from "../features/situations/slugs";
 
 // Pure helpers for the Cloudflare Worker entry (cloudflare/worker.ts). They
 // make a request on Cloudflare look to the app like one on Vercel, so the
@@ -150,6 +152,11 @@ export const CRON_ROUTES: Record<string, string> = {
   "*/5 * * * *": "/api/internal/browse-index/drain",
   "*/15 * * * *": "/api/internal/video-payments/sweep",
   "0 13 * * *": "/api/internal/ai-visibility",
+  // The weekly prompt panel: every 10 minutes on Monday afternoons (UTC) until
+  // the week's questions are answered; later firings do nothing.
+  "*/10 14-17 * * 1": "/api/internal/ai-panel",
+  "30 7 * * *": "/api/internal/related-diagrams",
+  "45 7 * * *": "/api/internal/architecture-hubs",
 };
 
 // ---------------------------------------------------------------------------
@@ -194,6 +201,14 @@ const OWN_FIRST_SEGMENTS = new Set([
   "sponsors",
   "sponsor-previews",
   "og-fonts",
+  // The comparison pages (/compare/{tool}). GitHub reserves the name, so no
+  // owner is called "compare".
+  "compare",
+  // The situation guides (/guides/{slug}). GitHub reserves this name too.
+  "guides",
+  // The architecture hubs (/architecture-examples/{hub}); no GitHub account
+  // has the name.
+  "architecture-examples",
 ]);
 
 /** `/owner/repo`, or with `images` its social pictures too. */
@@ -247,16 +262,17 @@ export function edgeDecision(
 ): EdgeDecision {
   const limit = RATE_LIMITED_PATHS[pathname];
   if (limit) return { action: "limit", limit };
-  if (isScannerPath(pathname)) return { action: "missing" };
-  const agent = userAgent ?? "";
-  // 2026-07-08: ClaudeBot crawling thousands of unique repository pages.
-  if (agent.includes("ClaudeBot") && isRepositoryRoute(pathname, false))
-    return { action: "deny", rule: "claudebot-repository-crawl" };
-  // Sep 2026: 221k crawler requests a week on pages and social pictures.
-  if (agent.includes("Amazonbot") && isRepositoryRoute(pathname, true))
-    return { action: "deny", rule: "amazonbot-repository-crawl" };
-  if (agent === "Brightbot 1.0" && isRepositoryRoute(pathname, true))
-    return { action: "deny", rule: "brightbot-repository-crawl" };
+  if (
+    isScannerPath(pathname) ||
+    isUnknownComparePath(pathname) ||
+    isUnknownGuidePath(pathname)
+  )
+    return { action: "missing" };
+  // No crawler is refused by name. ClaudeBot, Amazonbot and Brightbot were
+  // denied repository pages while those pages cost Vercel function time
+  // (2026-07 to 2026-11). On Workers a page costs about 150 ms of CPU and two
+  // R2 writes from the credits, and being read is how AI assistants learn
+  // GitDiagram, so they get the per-address limit below like everyone else.
   // Not a Vercel rule. A repository page that is not cached yet costs a
   // render (about 150 ms of CPU) and two R2 writes, and there is no end of
   // names to ask for. 120 a minute is far above a person, and room for a

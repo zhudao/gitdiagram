@@ -109,9 +109,9 @@ They live in the site's Worker and both servers (`wrangler secret list`, also wi
 `cloudflare/worker.ts` (pure logic and tests in `src/lib/cloudflare-edge.ts`):
 
 - Writes Vercel-style request headers from Cloudflare's data (`x-vercel-ip-*`, `x-forwarded-for`, `x-real-ip`, `x-forwarded-host/proto`) and drops a caller's own copies. The audience and limit rules read these.
-- Firewall: per-address rate limits (`ratelimits` bindings) on the generation routes and repository pages; ClaudeBot, Amazonbot and Brightbot blocked on repository pages; scanner paths answered 404; `www` redirected to the apex.
+- Firewall: per-address rate limits (`ratelimits` bindings) on the generation routes and repository pages; no crawler refused by name (ClaudeBot, Amazonbot and Brightbot were, until 2026-11-09); scanner paths answered 404; `www` redirected to the apex.
 - Hands `/api/video/generate`, `/api/video/render` and `/api/video/render/segment` to the render containers, after answering wrong-method and cross-origin calls itself so a stray request never wakes one.
-- Runs the three crons (`triggers.crons` in `wrangler.jsonc`, to the same internal routes with `CRON_SECRET`). A test keeps `wrangler.jsonc` and the map (`CRON_ROUTES`) in step.
+- Runs the four crons (`triggers.crons` in `wrangler.jsonc`, to the same internal routes with `CRON_SECRET`). A test keeps `wrangler.jsonc` and the map (`CRON_ROUTES`) in step.
 - Adds `next.config.js` site-wide headers where OpenNext leaves them off, strips `s-maxage` and `Vercel-*` response headers, gives outgoing `fetch` a User-Agent (GitHub refuses requests without one), and adds `Server-Timing: edge;dur=...;desc="warm"|"new isolate"`.
 
 **The Next.js proxy is not in the Cloudflare build** (`scripts/cf-drop-proxy.mjs` removes it). `src/proxy.ts` (local, the render containers) and the Worker entry both apply the rules in `src/lib/proxy-rules.ts` (forged Server Actions, lowercase repository URLs, the Markdown twin, counting crawler fetches). Change the rules there, not in `proxy.ts`.
@@ -120,7 +120,7 @@ They live in the site's Worker and both servers (`wrangler secret list`, also wi
 
 ### Page cache
 
-Pages and data-cache entries live in R2 bucket `gitdiagram-next-cache` (7-day lifecycle). `src/lib/colo-cache.ts` (wired in `open-next.config.ts`) puts copies in front: each Cloudflare location keeps a page in the Cache API (trusted for 30 s, `RECHECK_MS`; an older copy is still answered at once and checked after the response); a location without one asks the placed server, which hands over its cache entry or renders; the server only hands out entries the tag cache (Durable Objects) calls current. `revalidatePath` reaches other locations within about 40 s plus one request. Entries over about 1.5 MB (the sitemaps) get no copies. A request with `x-gitdiagram-full-path` skips the edge copy.
+Pages and data-cache entries live in R2 bucket `gitdiagram-next-cache` (7-day lifecycle). `src/lib/colo-cache.ts` (wired in `open-next.config.ts`) puts copies in front: each Cloudflare location keeps a page in the Cache API (trusted for 30 s, `RECHECK_MS`; an older copy is still answered at once and checked after the response); a location without one asks the placed server, which hands over its cache entry or renders; the server only hands out entries the tag cache (Durable Objects) calls current. `revalidatePath` reaches other locations within about 40 s plus one request. Entries over about 1.5 MB get no copies (sitemap shards are sized to stay under it, `SITEMAP_PAGE_SIZE`). A request with `x-gitdiagram-full-path` skips the edge copy.
 
 A `GET` under `/api/` (not `/api/internal` or `/api/admin`, no `Authorization` or `Range`) that answers 200 with `s-maxage` or `CDN-Cache-Control` and no cookie is also kept per location (`cloudflare/edge-answers.ts`; header `x-edge-cache: HIT|STALE|MISS`). Give a new public `GET` route a shared lifetime only if its answer is the same for everyone.
 
@@ -130,7 +130,7 @@ A `GET` under `/api/` (not `/api/internal` or `/api/admin`, no `Authorization` o
 - A request must not await a promise another request started. A promise kept at module level must go through `sharedRead` / `outliveRequest` (`src/server/shared-read.ts`), or a cancelled first caller hangs every later request on that isolate.
 - `fetch(..., { redirect: "error" })` throws a TypeError. Use `"manual"` and treat a 3xx as a failure.
 - Node-only HTTP clients can hang: Stripe uses its fetch client on Workers, and `r2.ts` uses the AWS SDK's fetch handler (where `fetch` has already un-gzipped objects stored with `Content-Encoding: gzip`).
-- Model APIs see the **visitor's** country on calls from a Worker, and OpenAI refuses some countries with a 403. Model SDK clients on the Worker take `...modelFetchOption()` (`src/server/model-fetch.ts`), which resends a refused call through the `US_RELAY` Durable Object. `GET /api/internal/model-relay` with `CRON_SECRET` checks it.
+- Model APIs see the **visitor's** country on calls from a Worker, and OpenAI refuses some countries with a 403. Model SDK clients on the Worker take `...modelFetchOption()` (`src/server/model-fetch.ts`), which resends a refused call through the `US_RELAY` Durable Object. `GET /api/internal/model-relay` with `CRON_SECRET` checks it (`?provider=meta&stream=1` checks Meta's path, with one tiny streamed answer).
 - An uncached `fetch` (a token mint, `cache: "no-store"`) while a page renders for the cache fails the page with a 500. Keep such calls out of anything a layout or cached page reads.
 - api.indexnow.org and bing.com answer 429 to Workers' shared addresses; `indexnow.ts` falls back to Yandex and Seznam.
 
@@ -154,7 +154,7 @@ Billed: Worker requests and CPU, Durable Object requests, R2 writes (two per new
 4. **Compilation** (`compileDiagramGraph` in `graph.ts`): deterministic AST to Mermaid, with total text escaping and GitHub-only links. The JSDOM parser in `mermaid-validator.ts` is **test-only**: never import it (or `mermaid.ts`) into production code.
 5. **Client rendering** (`src/components/mermaid-diagram.tsx`, `src/features/diagram/mermaid-security.ts`): Mermaid with `securityLevel: "antiscript"` and `htmlLabels: false`, DOMPurify on the SVG, then the GitHub-only link allowlist again. `strict` is not usable: it disables the `click` directives the diagram depends on.
 
-Also: `/api/generate/cost`, `/api/generate/cancel` (Redis), `/api/diagram-state`, `/api/healthz`. `generation-policy.ts` holds model, token and effort constants; `model-config.ts` picks the provider (`AI_PROVIDER` = openai | openrouter, both through the OpenAI SDK); `pricing.ts` and `complimentary-gate.ts` handle cost and the free daily token gate. `experiments/diagram-evidence/` holds the eval.
+Also: `/api/generate/cost`, `/api/generate/cancel` (Redis), `/api/diagram-state`, `/api/healthz`. `generation-policy.ts` holds model, token and effort constants; `model-config.ts` picks the provider (`AI_PROVIDER` = openai | openrouter | meta, all through the OpenAI SDK's Responses API); `pricing.ts` and `complimentary-gate.ts` handle cost and the free daily token gate. `experiments/diagram-evidence/` holds the eval. **Meta** (`META_API_KEY`, Muse Ember, `experiments/diagram-ember`) runs only GitDiagram's own generations: a visitor's saved key is an OpenAI key and still goes to OpenAI (`getGenerationProvider`). On Workers every Meta call goes through the `US_RELAY` Durable Object (`relayedModelFetchOption`), because Meta sees the Cloudflare location the Worker runs in, not a fixed server.
 
 **Abuse control:** generations on the server's own key pass a per-IP limiter (`generate/rate-limit.ts`) before the daily complimentary quota; callers with their own key skip it. Every caller of `/cost` and `/stream` also passes a looser infrastructure limiter. Both fail open on Redis errors because the daily quota still bounds spend. Mutating API routes require same-origin requests (`src/server/http/`).
 
@@ -178,6 +178,11 @@ On in production (`VIDEO_EXPLAINER_ENABLED=1`, `NEXT_PUBLIC_VIDEO_EXPLAINER=1`).
 - **Runs that die** (`run-journal.ts`, `src/server/drain.ts`): an instance told to stop finishes its work first. A killed one runs no cleanup, so every run keeps a journal entry and holds its lock as a short lease; `reapOrphanedRuns` gives back the budget places of a silent run, and a payer's retry takes the payment over (`claimVideoPayment`).
 - **Feedback** (`/api/video/feedback`): emails `VIDEO_FEEDBACK_TO` through Resend from `feedback@mail.gitdiagram.com` (a standalone Resend account since 2026-10-07, Google sign-in as ahmed@gitdiagram.com; the older Vercel Marketplace account's key and DNS records are unused but still there).
 - **Analytics**: `video_started`, `video_progress`, `video_shared` (`watch-analytics.ts`), `video_paywall_viewed` and `video_checkout_clicked`, in PostHog (`docs/operations/posthog.md`).
+
+## AI visibility (in `/admin`)
+
+- **Daily cohort** (`src/server/visibility/ai-visibility.ts`, cron 13:00 UTC): the 12 fixed `AI_VISIBILITY_PROMPTS` to ChatGPT and Claude, with search and from memory, about $1 a day. Never reword or drop those prompts: their history is the trend.
+- **Weekly prompt panel** (`ai-panel.ts`, `ai-panel-prompts.ts`, `ai-panel-gaps.ts`; cron every 10 minutes Mondays 14:00-17:50 UTC, each firing answers what is still open): about 100 buyer-situation prompts to ChatGPT, Claude, Gemini and Perplexity, all with web search; Gemini (Google grounding) and Perplexity go through OpenRouter. Each miss gets a diagnosis and a fix in the "Prompt gaps" panel, plus the most-cited external URLs (the outreach list). A full week costs about $10.40 (cap `AI_PANEL_MAX_USD`, default $11). Gemini and Perplexity are skipped while the OpenRouter balance is under `AI_PANEL_OPENROUTER_FLOOR_USD` (default $15), because narration is paid from the same balance. When a page that answers a prompt ships, set that prompt's `page` in `ai-panel-prompts.ts`.
 
 ## Operator dashboard (`/admin`)
 

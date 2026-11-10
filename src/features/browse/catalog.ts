@@ -15,6 +15,10 @@ export interface BrowseIndexEntry {
   repo: string;
   lastSuccessfulAt: string;
   stargazerCount: number | null;
+  /** GitHub's primary language, when known (left out when it is not). */
+  language?: string;
+  /** GitHub knows the repository under another name now (an old name). */
+  renamed?: true;
 }
 
 export interface BrowseQuery {

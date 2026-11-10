@@ -3,6 +3,7 @@ import type { DiagramStateResponse } from "~/features/diagram/types";
 import {
   diagramReadout,
   diagramSourceLinks,
+  entryPointNames,
   explanationSummary,
   UNGROUPED_LABEL,
 } from "./readout";
@@ -111,6 +112,33 @@ describe("diagramReadout", () => {
     ]);
   });
 
+  it("names the most connected components with files as entry points", () => {
+    // "Worker" has a path but no arrow; "User" has arrows but no file.
+    expect(diagramReadout(state(), "acme", "demo")!.entryPoints).toEqual([
+      {
+        label: "API server",
+        path: "api/server.py",
+        href: "https://github.com/acme/demo/blob/dev/api/server.py",
+      },
+    ]);
+  });
+
+  it("shows entry point files by name, with a folder when names repeat", () => {
+    expect(
+      entryPointNames([
+        "fastapi/routing.py",
+        "fastapi/dependencies/utils.py",
+        "fastapi/openapi/utils.py",
+        "./docs/",
+      ]),
+    ).toEqual([
+      "routing.py",
+      "dependencies/utils.py",
+      "openapi/utils.py",
+      "docs",
+    ]);
+  });
+
   it("converts older HTML explanations and needs a diagram", () => {
     expect(
       diagramReadout(
@@ -124,6 +152,20 @@ describe("diagramReadout", () => {
 });
 
 describe("explanationSummary", () => {
+  it("leaves labels to the plain description", () => {
+    for (const label of [
+      "**Frontend (SvelteKit Application)**",
+      "[Playback Layer (Web Workers & Worklets)]",
+      "Main services of the backend that matter here:",
+      "- Publisher and Subscriber components handling",
+    ])
+      expect(
+        explanationSummary(
+          `### Main\n${label}\n- Something longer that would fit.`,
+        ),
+      ).toBeNull();
+  });
+
   it("takes whole sentences up to the limit, skipping headings", () => {
     const text = [
       "# Overview",

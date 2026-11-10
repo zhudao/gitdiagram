@@ -1,4 +1,4 @@
-import { architectureText } from "~/features/diagram/architecture-text";
+import { storedExplanationText } from "~/features/diagram/legacy-explanation";
 import {
   normalizeDiagramText,
   type DiagramGraph,
@@ -37,9 +37,18 @@ interface ReadoutConnection {
   evidencePath: string | null;
 }
 
+/** A file to start reading the code at (a component with a linked path). */
+interface ReadoutEntryPoint {
+  label: string;
+  path: string;
+  href: string;
+}
+
 export interface DiagramReadout {
   /** The explanation in the notes' small Markdown subset (may be empty). */
   explanation: string;
+  /** The most connected components that name a file, most connected first. */
+  entryPoints: ReadoutEntryPoint[];
   groups: ReadoutGroup[];
   connections: ReadoutConnection[];
   componentCount: number;
@@ -94,11 +103,12 @@ export function diagramReadout(
   if (!state.diagram) return null;
   const graph: DiagramGraph | null = state.graph;
   const explanation = state.explanation
-    ? architectureText(state.explanation)
+    ? storedExplanationText(state.explanation)
     : "";
   if (!graph) {
     return {
       explanation,
+      entryPoints: [],
       groups: [],
       connections: [],
       componentCount: 0,
@@ -163,6 +173,7 @@ export function diagramReadout(
 
   return {
     explanation,
+    entryPoints: entryPoints(graph, groups),
     groups: groups.filter((group) => group.components.length > 0),
     connections,
     componentCount: labels.size,
@@ -170,7 +181,80 @@ export function diagramReadout(
   };
 }
 
+const ENTRY_POINT_COUNT = 4;
+
+/**
+ * The components the diagram's arrows run through most (an arrow out counts
+ * a little more than one in), among those that link a file in the repo.
+ */
+function entryPoints(
+  graph: DiagramGraph,
+  groups: ReadoutGroup[],
+): ReadoutEntryPoint[] {
+  const weight = new Map<string, number>();
+  for (const edge of graph.edges) {
+    weight.set(edge.from, (weight.get(edge.from) ?? 0) + 1.2);
+    weight.set(edge.to, (weight.get(edge.to) ?? 0) + 1);
+  }
+  const seen = new Set<string>();
+  return groups
+    .flatMap((group) => group.components)
+    .filter(
+      (
+        component,
+      ): component is ReadoutComponent & {
+        path: string;
+        href: string;
+      } => Boolean(component.path && component.href),
+    )
+    .map((component, order) => ({ component, order }))
+    .sort(
+      (left, right) =>
+        (weight.get(right.component.id) ?? 0) -
+          (weight.get(left.component.id) ?? 0) || left.order - right.order,
+    )
+    .filter(({ component }) => {
+      if (seen.has(component.path)) return false;
+      seen.add(component.path);
+      return (weight.get(component.id) ?? 0) > 0;
+    })
+    .slice(0, ENTRY_POINT_COUNT)
+    .map(({ component }) => ({
+      label: component.label,
+      path: component.path,
+      href: component.href,
+    }));
+}
+
+/**
+ * How an entry point's file is shown: its name, or its last two parts when
+ * another entry point has a file of the same name.
+ */
+export function entryPointNames(paths: readonly string[]): string[] {
+  const parts = paths.map((path) =>
+    path.replace(/^\.\//, "").replace(/\/+$/, "").split("/"),
+  );
+  const base = parts.map((part) => part[part.length - 1] ?? "");
+  return parts.map((part, index) =>
+    base.filter((name) => name === base[index]).length > 1
+      ? part.slice(-2).join("/")
+      : (base[index] ?? ""),
+  );
+}
+
 /** Plain text of one line of the notes' Markdown subset. */
+/** A line that names something instead of saying something. */
+function isLabelLine(line: string): boolean {
+  const trimmed = line.trim().replace(/^[-*]\s+/, "");
+  const words = plainLine(trimmed).split(" ").filter(Boolean);
+  return (
+    words.length < 6 ||
+    /^\*\*[^*]+\*\*:?$/.test(trimmed) ||
+    /^\[[^\]]+\]:?$/.test(trimmed) ||
+    (/:$/.test(trimmed) && words.length < 10)
+  );
+}
+
 function plainLine(line: string): string {
   return line
     .replace(/^#{1,6}\s+/, "")
@@ -183,18 +267,23 @@ function plainLine(line: string): string {
 /**
  * The first sentences of an explanation, as a meta description of at most
  * `max` characters. Headings are skipped; a first sentence that is too long
- * is cut at a word with an ellipsis. Null when there is no prose.
+ * is cut at a word with an ellipsis. Null when there is no prose, or when
+ * the first line is a label rather than a sentence (fewer than six words,
+ * all bold, in brackets, or a short line ending in a colon), as in old diagrams' cleaned
+ * notes ("**Frontend (SvelteKit Application)**"): the page then uses its
+ * plain description instead.
  */
 export function explanationSummary(
   explanation: string,
   max = 160,
 ): string | null {
-  const paragraph = explanation
+  const first = explanation
     .split("\n")
     .filter((line) => line.trim() && !/^\s*#/.test(line))
-    .map(plainLine)
-    .find((line) => line.length > 30);
-  if (!paragraph) return null;
+    .find((line) => plainLine(line).length > 30);
+  if (!first || isLabelLine(first)) return null;
+  // "…rather than one integrated application:" ends a sentence here.
+  const paragraph = plainLine(first).replace(/:$/, ".");
   // "Node.js" and "v2.py" stay whole: a sentence ends at punctuation + space.
   const sentences = paragraph.split(/(?<=[.!?])\s+/);
   let summary = "";

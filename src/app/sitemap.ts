@@ -5,9 +5,32 @@ import {
   getCachedBrowseIndexTotal,
 } from "~/server/browse-index-cache";
 import type { BrowseIndexEntry } from "~/features/browse/catalog";
+import {
+  COMPARE_CHECKED,
+  COMPARE_PAGES,
+  ROUNDUP_PATH,
+  comparePath,
+} from "~/features/compare/content";
+import {
+  REPORT_PATH,
+  REPORT_PUBLISHED,
+} from "~/features/architecture-report/content";
+import { POPULAR, POPULAR_PATH } from "~/features/popular-repos/content";
 import { GUIDE_UPDATED } from "~/features/guide/content";
+import {
+  SITUATIONS_CHECKED,
+  SITUATION_PAGES,
+  situationPath,
+} from "~/features/situations/content";
+import { HUBS_PATH, hubPath } from "~/features/architecture-hubs/hubs";
+import { readArchitectureHubs } from "~/server/storage/architecture-hubs-read";
 import { SITE_URL } from "~/lib/site";
-import { getSitemapCount, SITEMAP_PAGE_SIZE } from "~/lib/sitemaps";
+import {
+  getSitemapCount,
+  mostStarredEntries,
+  POPULAR_SITEMAP_COUNT,
+  SITEMAP_PAGE_SIZE,
+} from "~/lib/sitemaps";
 import { isVideoExplainerEnabled } from "~/server/explainer/config";
 import { listVideoCards } from "~/server/explainer/catalog";
 
@@ -29,6 +52,30 @@ const getVideoRoutes = unstable_cache(
   { revalidate: 3600 },
 );
 
+// The architecture hubs and every one of their pages (a few hundred URLs, from
+// one small cached object). Left out while it cannot be read.
+async function getHubRoutes(): Promise<MetadataRoute.Sitemap> {
+  const index = await readArchitectureHubs().catch(() => null);
+  if (!index?.hubs.length) return [];
+  const lastModified = new Date(index.updatedAt);
+  return [
+    {
+      url: `${SITE_URL}${HUBS_PATH}`,
+      lastModified,
+      changeFrequency: "weekly" as const,
+      priority: 0.7,
+    },
+    ...index.hubs.flatMap((hub) =>
+      Array.from({ length: hub.pages }, (_, page) => ({
+        url: `${SITE_URL}${hubPath(hub.slug, page + 1)}`,
+        lastModified,
+        changeFrequency: "weekly" as const,
+        priority: page === 0 ? 0.7 : 0.4,
+      })),
+    ),
+  ];
+}
+
 function toValidDate(value: string): Date | null {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? new Date(timestamp) : null;
@@ -49,7 +96,7 @@ function getStaticRoutes(latestBrowseUpdate: Date): MetadataRoute.Sitemap {
   return [
     {
       url: SITE_URL,
-      lastModified: new Date(),
+      lastModified: latestBrowseUpdate,
       changeFrequency: "daily",
       priority: 1,
     },
@@ -63,13 +110,13 @@ function getStaticRoutes(latestBrowseUpdate: Date): MetadataRoute.Sitemap {
       ? [
           {
             url: `${SITE_URL}/videos`,
-            lastModified: new Date(),
+            lastModified: latestBrowseUpdate,
             changeFrequency: "daily" as const,
             priority: 0.8,
           },
           {
             url: `${SITE_URL}/reels`,
-            lastModified: new Date(),
+            lastModified: latestBrowseUpdate,
             changeFrequency: "daily" as const,
             priority: 0.6,
           },
@@ -79,6 +126,36 @@ function getStaticRoutes(latestBrowseUpdate: Date): MetadataRoute.Sitemap {
       url: `${SITE_URL}/visualize-codebase`,
       lastModified: new Date(GUIDE_UPDATED),
       changeFrequency: "monthly",
+      priority: 0.8,
+    },
+    {
+      url: `${SITE_URL}${ROUNDUP_PATH}`,
+      lastModified: new Date(COMPARE_CHECKED),
+      changeFrequency: "monthly",
+      priority: 0.7,
+    },
+    ...COMPARE_PAGES.map((page) => ({
+      url: `${SITE_URL}${comparePath(page.slug)}`,
+      lastModified: new Date(COMPARE_CHECKED),
+      changeFrequency: "monthly" as const,
+      priority: 0.6,
+    })),
+    ...SITUATION_PAGES.map((page) => ({
+      url: `${SITE_URL}${situationPath(page.slug)}`,
+      lastModified: new Date(SITUATIONS_CHECKED),
+      changeFrequency: "monthly" as const,
+      priority: 0.6,
+    })),
+    {
+      url: `${SITE_URL}${REPORT_PATH}`,
+      lastModified: new Date(REPORT_PUBLISHED),
+      changeFrequency: "yearly",
+      priority: 0.7,
+    },
+    {
+      url: `${SITE_URL}${POPULAR_PATH}`,
+      lastModified: new Date(POPULAR.checked),
+      changeFrequency: "weekly",
       priority: 0.8,
     },
     {
@@ -95,8 +172,9 @@ function getStaticRoutes(latestBrowseUpdate: Date): MetadataRoute.Sitemap {
 export async function generateSitemaps() {
   const browseTotal = await getCachedBrowseIndexTotal().catch(() => null);
   const videoRoutes = await getVideoRoutes().catch(() => []);
+  const hubRoutes = await getHubRoutes();
   const sitemapCount = getSitemapCount(
-    (browseTotal ?? 0) + videoRoutes.length,
+    (browseTotal ?? 0) + videoRoutes.length + hubRoutes.length,
     getStaticRoutes(new Date()).length,
   );
 
@@ -108,28 +186,40 @@ export default async function sitemap(props: {
 }): Promise<MetadataRoute.Sitemap> {
   const id = Number.parseInt(await props.id, 10);
   const sitemapId = Number.isFinite(id) && id >= 0 ? id : 0;
-  const browseEntries = await getCachedBrowseIndex().catch(() => null);
+  const browseEntries = (await getCachedBrowseIndex().catch(() => null)) ?? [];
   const latestBrowseUpdate = getLatestBrowseUpdate(browseEntries);
-  // Video watch pages ride on the first page, after the fixed routes.
-  const staticRoutes = [
-    ...getStaticRoutes(latestBrowseUpdate),
-    ...(await getVideoRoutes().catch(() => [])),
-  ];
+  const repoRoute = (entry: BrowseIndexEntry, priority: number) => ({
+    url: `${SITE_URL}/${entry.username}/${entry.repo}`,
+    lastModified: toValidDate(entry.lastSuccessfulAt) ?? latestBrowseUpdate,
+    changeFrequency: "monthly" as const,
+    priority,
+  });
 
-  const staticRouteCount = staticRoutes.length;
-  const repoOffset = Math.max(
-    0,
-    sitemapId * SITEMAP_PAGE_SIZE - staticRouteCount,
+  // The order of every listed page across all shards: the fixed routes, the
+  // most-starred repositories, the video watch pages, then every other
+  // repository in the index's order. Each shard is one slice of it.
+  const popular = mostStarredEntries(browseEntries, POPULAR_SITEMAP_COUNT);
+  const popularKeys = new Set(
+    popular.map((entry) => `${entry.username}/${entry.repo}`),
   );
-  const repoLimit =
-    sitemapId === 0 ? SITEMAP_PAGE_SIZE - staticRouteCount : SITEMAP_PAGE_SIZE;
-  const repoRoutes =
-    browseEntries?.slice(repoOffset, repoOffset + repoLimit).map((entry) => ({
-      url: `${SITE_URL}/${entry.username}/${entry.repo}`,
-      lastModified: toValidDate(entry.lastSuccessfulAt) ?? latestBrowseUpdate,
-      changeFrequency: "monthly" as const,
-      priority: 0.5,
-    })) ?? [];
-
-  return sitemapId === 0 ? [...staticRoutes, ...repoRoutes] : repoRoutes;
+  const head: MetadataRoute.Sitemap = [
+    ...getStaticRoutes(latestBrowseUpdate),
+    ...popular.map((entry) => repoRoute(entry, 0.7)),
+    ...(await getVideoRoutes().catch(() => [])),
+    ...(await getHubRoutes()),
+  ];
+  const start = sitemapId * SITEMAP_PAGE_SIZE;
+  const end = start + SITEMAP_PAGE_SIZE;
+  const routes = head.slice(start, end);
+  if (routes.length < SITEMAP_PAGE_SIZE) {
+    // Walk the rest of the index only as far as this shard reaches.
+    let position = head.length;
+    for (const entry of browseEntries) {
+      if (popularKeys.has(`${entry.username}/${entry.repo}`)) continue;
+      if (position >= end) break;
+      if (position >= start) routes.push(repoRoute(entry, 0.5));
+      position += 1;
+    }
+  }
+  return routes;
 }
